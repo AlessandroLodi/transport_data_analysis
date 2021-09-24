@@ -173,11 +173,11 @@ class Subplot:
         for key in settings:
             self._settings[key] = settings[key]
         if args:
-            lst = {}
+            dct = {}
             for arg in args:
                 if arg in self._settings:
-                    lst[arg] = self._settings[arg]
-            return lst
+                    dct[arg] = self._settings[arg]
+            return dct
         else:
             return self._settings
 
