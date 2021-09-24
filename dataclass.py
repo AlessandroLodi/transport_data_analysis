@@ -147,7 +147,7 @@ class Subplot:
         "title_align": "center",
         "scilimits": (-3, 3),
     }
-    
+
     def __init__(self, *datasets, **settings):
         self.datasets = list(datasets)
         self._settings = settings
