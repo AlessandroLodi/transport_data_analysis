@@ -1,7 +1,7 @@
 import numpy as np
 
 from transport_data_analysis import QTLabData, StabilityDiagram
-from transport_data_analysis.qtlab_data import QTLab_Data
+from transport_data_analysis.qtlab import QTLab_Data
 
 
 def test_qtlab_header_sets_axes_and_metadata(tmp_path):

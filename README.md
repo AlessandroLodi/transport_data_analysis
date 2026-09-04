@@ -81,7 +81,7 @@ current = PhysicsModels.marcus(
 
 Energies and voltages use eV/V, temperature uses kelvin, and model currents are
 returned in amperes. The legacy names `physics_models`, `spectral_density_model`,
-`Cyclic_Data`, and the old module paths remain available for existing notebooks.
+and `Cyclic_Data` remain available from the package root for existing notebooks.
 
 ## Develop
 
