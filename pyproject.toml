@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "transport-data-analysis"
+version = "0.1.0"
+description = "Tools for analysing molecular-junction transport measurements"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "matplotlib>=3.7",
+    "numpy>=1.24",
+    "pandas>=2.0",
+    "scipy>=1.10",
+]
+
+[project.optional-dependencies]
+fit = ["lmfit>=1.2"]
+dev = ["pytest>=7.4", "ruff>=0.6"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# The interactive plotting callbacks intentionally tolerate backend-specific
+# exceptions; the numerical and I/O paths remain fully linted.
+"src/transport_data_analysis/data.py" = ["B007", "E722", "E741", "UP031"]
+"src/transport_data_analysis/qtlab.py" = ["E722"]

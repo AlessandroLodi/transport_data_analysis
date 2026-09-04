@@ -1,26 +1,23 @@
-import os
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
-import matplotlib.ticker as ticker
-import matplotlib.pylab as pl
-from matplotlib.cm import get_cmap
-import matplotlib.mlab as mlab
-from mpl_toolkits.mplot3d import Axes3D
-from matplotlib.ticker import ScalarFormatter, FormatStrFormatter
-import re
-import scipy.interpolate
-from scipy.optimize import curve_fit
-from matplotlib.colors import to_rgba
-import re
-from collections import OrderedDict
+"""Readers and analysis helpers for QTLab transport measurements."""
 
-from .dataclass import *
-from .physics_models import *
+from __future__ import annotations
 
-# from dataclass import *
-# from physics_models import *
 import calendar
+import logging
+import re
+import time
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+from matplotlib.colors import to_rgba
+from scipy.signal import savgol_filter
+
+from .data import Cyclic_Data, Data, Dataset, Figure, Subplot, _read_delimited_file
+from .peaks import peakdet
+from .physics import physics_models
+
+logger = logging.getLogger(__name__)
 
 
 class Subplot_IVg(Subplot):
@@ -296,7 +293,7 @@ class Subplot_ExcitedStateSpectrum(Subplot):
                         subplot["ax"].text(
                             peak[0],
                             peak[1] * 1.05,
-                            "{:.1f}".format(peak[0] * 1e3),
+                            f"{peak[0] * 1e3:.1f}",
                             horizontalalignment="center",
                             verticalalignment="bottom",
                         )
@@ -332,15 +329,15 @@ class Subplot_ShowExcitationLines(Subplot_GVsVg):
             a = ps["alpha_gate"] / (1 - ps["alpha_source"])
             b = -ps["alpha_gate"] / ps["alpha_source"]
             if direction == "source":
-                x1 = o / np.sqrt(a ** 2 + 1)
+                x1 = o / np.sqrt(a**2 + 1)
                 x2 = (a / b) * x1
                 x3 = x2 - x1
             else:
-                x1 = o / np.sqrt(b ** 2 + 1)
+                x1 = o / np.sqrt(b**2 + 1)
                 x2 = (b / a) * x1
                 x3 = x2 - x1
 
-            for line in zip(lines[0], lines[1]):
+            for line in zip(lines[0], lines[1], strict=False):
                 x = line[0] + x3
                 y = line[1]
                 subplot["ax"].plot(
@@ -353,187 +350,63 @@ class Subplot_ShowExcitationLines(Subplot_GVsVg):
 
 class QTLab_Data(Cyclic_Data):
     @classmethod
-    # this override the methods you can find in the Data class
     def load_from_file(cls, filename, **kwargs):
-        dat = None
-        ps = {}
-        if filename and (type(filename) is str or type(filename) is np.str_):
-            if filename.split(".")[-1] in ("dat", "csv", "txt"):
-                print(f">>> Loading {filename}")
-                # read the header of the filename
-                axes = ("x", "y")
-                if kwargs.get("readheader", True):
-                    # read the entire reader
-                    header = ""
-                    with open(filename, "r") as f:
-                        i = 0
-                        while True:
-                            i += 1
-                            ln = f.readline()
-                            if i == 2:
-                                ps["timestamp"] = calendar.timegm(
-                                    time.strptime(ln[17:37], "%b %d %H:%M:%S %Y")
-                                )
-                            if len(ln) > 0 and (ln[0] == "#" or ln[0] == "\n"):
-                                header += ln
-                            else:
-                                break
-                    axes = re.findall("# Column \d+:[\s\S]+?name: (.+)\n", header)
-                    comments = re.findall(
-                        "# ([a-zA-Z0-9_]+): ([a-zA-Z0-9_\.]+)\n", header
-                    )
-                    for comment in comments:
-                        try:
-                            ps[comment[0]] = float(comment[1])
-                        except:
-                            ps[comment[0]] = comment[1]
+        filename = str(filename)
+        if filename.lower().endswith(".mat"):
+            return super().load_from_file(filename, **kwargs)
 
-                # set the axes (which might have been read from the file)
-                axes = kwargs.get("axes", axes)
-                ps["axes"] = axes
-                # add qtlab standards to the kwargs for pandas
-                # these two if lines add two dic elements
-                # {'comment': '#', 'delimiter', '\t'}
-                if "comment" not in kwargs:
-                    kwargs["comment"] = "#"
-                if "delimiter" not in kwargs:
-                    kwargs["delimiter"] = "\t"
-                # remove non pandas keys:
-                pandas_dct = dict(
-                    sep=", ",
-                    delimiter=None,
-                    header="infer",
-                    names=None,
-                    index_col=None,
-                    usecols=None,
-                    squeeze=False,
-                    prefix=None,
-                    mangle_dupe_cols=True,
-                    dtype=None,
-                    engine=None,
-                    converters=None,
-                    true_values=None,
-                    false_values=None,
-                    skipinitialspace=False,
-                    skiprows=None,
-                    nrows=None,
-                    na_values=None,
-                    keep_default_na=True,
-                    na_filter=True,
-                    verbose=False,
-                    skip_blank_lines=True,
-                    parse_dates=False,
-                    infer_datetime_format=False,
-                    keep_date_col=False,
-                    date_parser=None,
-                    dayfirst=False,
-                    iterator=False,
-                    chunksize=None,
-                    compression="infer",
-                    thousands=None,
-                    decimal=b".",
-                    lineterminator=None,
-                    quotechar='"',
-                    quoting=0,
-                    escapechar=None,
-                    comment=None,
-                    encoding=None,
-                    dialect=None,
-                    # tupleize_cols=None, deprecated
-                    error_bad_lines=True,
-                    warn_bad_lines=True,
-                    skipfooter=0,
-                    # skip_footer=0, deprecated
-                    doublequote=True,
-                    delim_whitespace=False,
-                    low_memory=True,
-                    # buffer_lines=None, deprecated
-                    memory_map=False,
-                    float_precision=None,
-                )
-                for key in kwargs:
-                    # print(f'key in kwargs are {key}')
-                    if key in pandas_dct:
-                        # print(f'kwargs[key] is: {kwargs[key]}')
-                        pandas_dct[key] = kwargs[key]
-                for key in pandas_dct:
-                    # print(f'key in pandas_dct is {key}')
-                    if key in kwargs:
-                        del kwargs[key]
-                del pandas_dct["names"]
-                d = pd.read_csv(filename, names=axes, **pandas_dct)
-                dat = {}
-                for key in d:
-                    if not d[key].empty:
-                        dat[key] = np.array(d[key])
-                if not dat:
-                    print(">> Warning: no data found for {}".format(filename))
-            elif filename.split(".")[-1] in ("mat"):
-                print(">>>>> Loading {}".format(filename))
-                # set the axes (which might have been read from the file)
-                axes = kwargs.get("axes", ("x", "y"))
-                ps["axes"] = axes
-                dct = loadmat(filename)
-                dat = {}
-                for key in axes:
-                    if key in dct and len(dct[key]) > 0:
-                        dat[key] = np.array(dct[key][0])
-                if not dat:
-                    print(
-                        ">> Warning: no data found in axes {} for {}. Possible axes: {}".format(
-                            axes, filename, [key for key in dct]
-                        )
-                    )
-            else:
-                raise RuntimeError(
-                    "Currently only supporting .txt, .dat, .csv files as raw data."
-                )
-        if dat:
-            return cls(dat, **{**ps, **kwargs})
-        return None
+        read_header = kwargs.pop("readheader", True)
+        metadata = {}
+        axes = tuple(kwargs.pop("axes", ()))
+        if read_header:
+            encoding = kwargs.get("encoding", "utf-8")
+            with open(filename, encoding=encoding) as stream:
+                header_lines = []
+                for line in stream:
+                    if line.startswith("#") or not line.strip():
+                        header_lines.append(line)
+                    else:
+                        break
+            header = "".join(header_lines)
+            discovered_axes = re.findall(r"# Column \d+:[\s\S]+?name: (.+)\n", header)
+            if discovered_axes and not axes:
+                axes = tuple(discovered_axes)
+            for key, value in re.findall(
+                r"# ([a-zA-Z0-9_]+): ([a-zA-Z0-9_.+-]+)\n", header
+            ):
+                try:
+                    metadata[key] = float(value)
+                except ValueError:
+                    metadata[key] = value
+        if not axes:
+            axes = ("x", "y")
+        data, remaining = _read_delimited_file(filename, axes, kwargs)
+        if not data:
+            raise ValueError(f"no data found in {filename}")
+        return cls(data, axes=list(axes), **metadata, **remaining)
 
 
 class Stability_Diagram(QTLab_Data):
     def __init__(self, dat, cyclic_method="None", **kwargs):
-        super().__init__(dat, **kwargs)
-        if "n" not in dat:
-            w = np.where(
-                dat[kwargs.get("Vg", "Vg")] < np.roll(dat[kwargs.get("Vg", "Vg")], 1)
-            )[0]
-            print(f"########### {kwargs}")
-            c = 0
-            n = []
-            l = len(n)
-            for ind in w[1:]:
-                try:
-                    l = len(n)
-                    n = np.hstack((n, np.ones(ind - l) * c))
-                except:
-                    n = np.ones(ind - l) * c
-                c += 1
-            try:
-                l = len(n)
-                n = np.hstack((n, np.ones(len(dat[kwargs.get("Vg", "Vg")]) - l) * c))
-            except:
-                n = np.ones(len(dat[kwargs.get("Vg", "Vg")])) * c
-            dat["n"] = np.array(n)
-        if not self.ps("initialised"):
-            self.to_matrix(kwargs.get("Vg", "Vg"))
-            if cyclic_method != "None":
-                try:
-                    self.average_cycles(cyclic_axis="Vsd")
-                except:
-                    pass
-                self.cycle_to_trace(
-                    cyclic_axis=kwargs.get("Vsd", "Vsd"), method=cyclic_method
-                )
-            self.axes = (
-                kwargs.get("Vg", "Vg"),
-                kwargs.get("Vsd", "Vsd"),
-                kwargs.get("Isd", "Isd"),
-            )
-            self.initialised = True
-            self.ps(initialised=True)
+        gate_axis = kwargs.get("Vg", "Vg")
+        bias_axis = kwargs.get("Vsd", "Vsd")
+        current_axis = kwargs.get("Isd", "Isd")
+        values = dict(dat)
+        if "n" not in values:
+            gate = np.asarray(values[gate_axis])
+            boundaries = np.flatnonzero(gate[1:] < gate[:-1]) + 1
+            labels = np.zeros(gate.size, dtype=int)
+            for cycle, boundary in enumerate(boundaries, start=1):
+                labels[boundary:] = cycle
+            values["n"] = labels
+
+        super().__init__(values, **kwargs)
+        self.to_matrix(gate_axis)
+        if cyclic_method not in {None, "None"}:
+            self.average_cycles(cyclic_axis=bias_axis)
+            self.cycle_to_trace(cyclic_axis=bias_axis, method=cyclic_method)
+        self.axes = (gate_axis, bias_axis, current_axis)
+        self.ps(initialised=True)
 
     def correct_offset(self, zero=0.1):
         vgs = np.unique(self._data["Vg"])
@@ -579,7 +452,6 @@ class Stability_Diagram(QTLab_Data):
         matrix[inverse, np.arange(len(vg))] = 1
         # perform the dot product for all the keys
         for k in ddat._data:
-            print(k)
             ddat._data[k] = (
                 matrix.dot(np.reshape(ddat[k].values, (-1, 1))).T.flatten() / weigths
             )
@@ -621,7 +493,6 @@ class Stability_Diagram(QTLab_Data):
         # get the unique Vg values, and the inverse array which contains indices for the Vsd elements
         un, inverse, weigths = np.unique(vg, return_inverse=True, return_counts=True)
         # create the multiplication matrix
-        print(f"un = {un}\n vg= {vg}\n")
         matrix = np.zeros((len(un), len(vg)))
         matrix[inverse, np.arange(len(vg))] = 1
         # perform the dot product for all the keys
@@ -643,7 +514,7 @@ class Stability_Diagram(QTLab_Data):
         """
         Return the derivative of the dataset
         """
-        ddat = self.copy()
+        self.copy()
         if axis.lower() in "Vg":
             pass
 
@@ -665,11 +536,9 @@ class Stability_Diagram(QTLab_Data):
 
         un, inverse, weights = np.unique(vsd, return_inverse=True, return_counts=True)
         matrix = np.zeros((len(un), len(vsd)))
-        print(matrix)
         matrix[inverse, np.arange(len(vsd))] = 1
 
         for k in ddat._data:
-            print(f"this is the key: {k}")
             ddat._data[k] = (
                 matrix.dot(np.reshape(ddat[k].values, (-1, 1))).T.flatten() / weights
             )
@@ -681,15 +550,12 @@ class Stability_Diagram(QTLab_Data):
 
     def resonance_bias_trace(self, width=0.0, centre=37):
         dat = self.copy()
-        print(centre)
         u = np.unique(dat._data["Vg"])
         if not width:
-            print("hello")
             dat.ps(Vc=centre)
             cvc = u[np.argmin(np.abs(u - dat.ps("Vc")["Vc"]))]
             dat = dat[dat["Vg"].values == cvc]
         else:
-            print("world")
             dat = dat[np.abs(dat["Vg"].values - dat.ps("Vc")["Vc"]) < width]
             # average Vsd values for each Vg {
             x = dat["Vsd"].values
@@ -737,9 +603,10 @@ class Stability_Diagram(QTLab_Data):
         dat = self._data
         Isd = dat["Isd"]
         Vg = dat["Vg"]
-        print("**************")
         if not func:
-            func = lambda Isd, Vg: np.gradient(np.log10(Isd)) / (Vg[1] - Vg[0])
+
+            def func(Isd, Vg):
+                return np.gradient(np.log10(Isd)) / (Vg[1] - Vg[0])
 
         if not p0:
             p0 = {}
@@ -763,9 +630,11 @@ class Stability_Diagram(QTLab_Data):
         except:
             dat = self.zero_bias_gate_trace()
         if not func:
-            func = lambda Vg, T, Vc, Gmax, alpha: physics_models.thermal_broadening(
-                Vg, self.ps("T")["T"], Vc, Gmax, alpha
-            )
+
+            def func(Vg, T, Vc, Gmax, alpha):
+                return physics_models.thermal_broadening(
+                    Vg, self.ps("T")["T"], Vc, Gmax, alpha
+                )
 
         gmax = np.max(dat._data["Gsd"])
         vc = dat._data["Vg"][np.argmax(dat._data["Gsd"])]
@@ -776,9 +645,9 @@ class Stability_Diagram(QTLab_Data):
         if type(p0) is dict:
             if "Gmax" in p0:
                 p0["Gmax"] /= gmax
-            if not "Vc" in p0:
+            if "Vc" not in p0:
                 p0["Vc"] = vc
-            if not "Gmax" in p0:
+            if "Gmax" not in p0:
                 p0["Gmax"] = 1
 
         dat = dat.copy()
@@ -791,7 +660,10 @@ class Stability_Diagram(QTLab_Data):
                 bounds["Gmax"] = [0.9, 1.1]
         if bounds:
             params, r2, fit = dat.fit(
-                func, p0=p0, bounds=bounds, return_dict=return_dict,
+                func,
+                p0=p0,
+                bounds=bounds,
+                return_dict=return_dict,
             )
         else:
             params, r2, fit = dat.fit(func, p0=p0, return_dict=return_dict)
@@ -820,9 +692,10 @@ class Stability_Diagram(QTLab_Data):
             1 / (1 + np.exp(-(dat["Isd"].values + window) / steepness)) - 1
         )
         self._confined = dat
-        sd = lambda data, Vc, alpha_gate, alpha_source: physics_models.stabdiag(
-            data, 1, Vc, alpha_gate, alpha_source, T
-        )
+
+        def sd(data, Vc, alpha_gate, alpha_source):
+            return physics_models.stabdiag(data, 1, Vc, alpha_gate, alpha_source, T)
+
         alpha = self.ps("alpha_gate")["alpha_gate"]
         if side == "neg":
             dat = dat[dat["Vsd"].values < 0]
@@ -831,7 +704,10 @@ class Stability_Diagram(QTLab_Data):
         params, r2, fit = dat.fit(
             sd,
             p0=[vc, alpha, 0.6],
-            bounds=([vc - 0.1, 0, 0], [vc + 0.1, 1, 1],),
+            bounds=(
+                [vc - 0.1, 0, 0],
+                [vc + 0.1, 1, 1],
+            ),
             ignore_error=False,
             return_dict=False,
         )
@@ -870,9 +746,12 @@ class Stability_Diagram(QTLab_Data):
             1 + np.exp(-(dat["Isd"].values / vsd - window) / steepness)
         ) + (1 / (1 + np.exp(-(dat["Isd"].values / vsd + window) / steepness)) - 1)
         self._confined = dat
-        sd = lambda data, Vc, alpha_gate, alpha_source, alpha_J, J: physics_models.curved_stabdiag(
-            data, 1, Vc, alpha_gate, alpha_source, alpha_J, T, J
-        )
+
+        def sd(data, Vc, alpha_gate, alpha_source, alpha_J, J):
+            return physics_models.curved_stabdiag(
+                data, 1, Vc, alpha_gate, alpha_source, alpha_J, T, J
+            )
+
         alpha = self.ps("alpha_gate")["alpha_gate"]
         if side == "neg":
             dat = dat[dat["Vsd"].values < 0]
@@ -882,14 +761,22 @@ class Stability_Diagram(QTLab_Data):
             params, r2, fit = dat.fit(
                 sd,
                 p0=[vc, alpha, 0.5, 0.5, 0.5],
-                bounds=([vc - 40, 0, 0, 0, 0.05], [vc + 40, 1, 1, 1, 1],),
+                bounds=(
+                    [vc - 40, 0, 0, 0, 0.05],
+                    [vc + 40, 1, 1, 1, 1],
+                ),
                 ignore_error=False,
             )
         else:
-            params, r2, fit = dat.fit(sd, p0=p0, bounds=bounds, ignore_error=False,)
+            params, r2, fit = dat.fit(
+                sd,
+                p0=p0,
+                bounds=bounds,
+                ignore_error=False,
+            )
         # params = [vc, alpha, 0.8, 0.1]
         # fit=dat.copy()
-        print("Fitting data with R^2 = {:.3g}".format(r2))
+        logger.info("fitted stability diagram with R² = %.3g", r2)
         if side != "both":
             fit = dat.copy()
             fit["Isd"] = np.array(sd((fit["Vg"].values, fit["Vsd"].values), *params))
@@ -922,7 +809,7 @@ class Stability_Diagram(QTLab_Data):
         Vg2 += ps["Vc"]
         Vs = []
         Vg = []
-        for x1, y1, x2, y2 in zip(Vg1, Vs1, Vg2, Vs2):
+        for x1, y1, x2, y2 in zip(Vg1, Vs1, Vg2, Vs2, strict=False):
             Vg.append(np.linspace(x1, x2, interpolation))
             Vs.append(np.linspace(y1, y2, interpolation))
         return (Vg, Vs)
@@ -953,23 +840,22 @@ class Stability_Diagram(QTLab_Data):
         a = ps["alpha_gate"] / (1 - ps["alpha_source"])
         b = -ps["alpha_gate"] / ps["alpha_source"]
         if direction == "source":
-            x1 = offset / np.sqrt(a ** 2 + 1)
+            x1 = offset / np.sqrt(a**2 + 1)
             y = a * x1
             x2 = (a / b) * x1
             x3 = x2 - x1
         else:
-            x1 = offset / np.sqrt(b ** 2 + 1)
+            x1 = offset / np.sqrt(b**2 + 1)
             y = b * x1
             x2 = (b / a) * x1
             x3 = x2 - x1
-        for line in zip(lines[0], lines[1]):
+        for line in zip(lines[0], lines[1], strict=False):
             line = [line[0] + x3, line[1]]
             E.append(line[1][0] - y)
             dat = self.copy()
             dat["Gsd"] = dat["Isd"].derive(x=dat["Vsd"], method=method)
             dat.axes = ("Vg", "Vsd", "Gsd")
             if reject_outliers:
-
                 # line = (line[1][:-1], line[0][:-1])
                 dat.interpolate(line)
                 dat = dat[
@@ -997,7 +883,6 @@ class Stability_Diagram(QTLab_Data):
         vc = self.ps("Vc")
         if not vc:
             a, _ = self.fit_coulomb_peak()
-            print("mi sto incazzando")
             vc = a["Vc"]
         fig = Figure()
         fig.add_subplot(Subplot_FitAlpha(self, **kwargs))
@@ -1017,7 +902,6 @@ class ADWin_Stability_Diagram(Stability_Diagram):
     ):
         super().__init__(dat, cyclic_method=cyclic_method, **kwargs)
         if digitise_adwin:
-
             self.flatten()
             self._data[Vsd] = (
                 np.array(list(map(int, ((self._data[Vsd] + 10) * 3276.8))))
@@ -1038,7 +922,7 @@ class QTLab_Dataset(Dataset):
         cls,
         directory=".",
         extensions=("dat", "txt", "csv"),
-        pattern=".*\d{6,6}_(?P<exp>[a-zA-Z0-9_]+)_(?P<type>[a-zA-Z0-9\-_]+?)_(?P<device>[a-zA-Z]+[0-9]+)\.(?:dat|csv|txt)",
+        pattern=r".*\d{6}_(?P<exp>[a-zA-Z0-9_]+)_(?P<type>[a-zA-Z0-9_-]+?)_(?P<device>[a-zA-Z]+[0-9]+)\.(?:dat|csv|txt)",
     ):
         dset = super().find(directory, extensions, pattern)
         dset.inspect_files()
@@ -1050,7 +934,7 @@ class QTLab_Dataset(Dataset):
         for filename in self._dct["filename"]:
             header = ""
             info = {}
-            with open(filename, "r") as f:
+            with open(filename) as f:
                 i = 0
                 while True:
                     i += 1
@@ -1064,8 +948,8 @@ class QTLab_Dataset(Dataset):
                     else:
                         break
 
-            info["axes"] = re.findall("# Column \d+:[\s\S]+?name: (.+)\n", header)
-            comments = re.findall("# ([a-zA-Z0-9_]+): ([a-zA-Z0-9_\.]+)\n", header)
+            info["axes"] = re.findall(r"# Column \d+:[\s\S]+?name: (.+)\n", header)
+            comments = re.findall(r"# ([a-zA-Z0-9_]+): ([a-zA-Z0-9_.]+)\n", header)
             for comment in comments:
                 try:
                     info[comment[0]] = float(comment[1])
@@ -1073,13 +957,13 @@ class QTLab_Dataset(Dataset):
                     info[comment[0]] = comment[1]
 
             for key in info:
-                if not key in keys:
+                if key not in keys:
                     keys.append(key)
 
             infolst.append(info)
         for key in keys:
             if key in self._dct:
-                print("> Updating info {} in dataset.".format(key))
+                logger.info("updating %s metadata in dataset", key)
                 del self._dct[key]
         for info in infolst:
             for key in keys:
@@ -1093,3 +977,34 @@ class QTLab_Dataset(Dataset):
                         self._dct[key] = [info[key]]
                     except:
                         self._dct[key] = [np.nan]
+
+
+# PEP 8 names for new code; legacy names remain importable.
+QTLabData = QTLab_Data
+StabilityDiagram = Stability_Diagram
+ADWinStabilityDiagram = ADWin_Stability_Diagram
+QTLabDataset = QTLab_Dataset
+
+
+__all__ = [
+    "ADWinStabilityDiagram",
+    "ADWin_Stability_Diagram",
+    "QTLabData",
+    "QTLabDataset",
+    "QTLab_Data",
+    "QTLab_Dataset",
+    "StabilityDiagram",
+    "Stability_Diagram",
+    "Subplot_ExcitedStateSpectrum",
+    "Subplot_FitAlpha",
+    "Subplot_FitVc",
+    "Subplot_GV",
+    "Subplot_GVg",
+    "Subplot_GVsVg",
+    "Subplot_IV",
+    "Subplot_IVg",
+    "Subplot_IVsVg",
+    "Subplot_ResonanceBiasTrace",
+    "Subplot_ShowExcitationLines",
+    "Subplot_ZeroBiasGateTrace",
+]

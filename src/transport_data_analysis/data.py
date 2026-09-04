@@ -1,46 +1,46 @@
-import calendar
-import csv
-from imports.qtlab_data import *
+"""Core data containers and plotting helpers.
+
+The module deliberately has no dependency on the QTLab-specific layer.  This
+keeps the reusable array operations available to projects that use other data
+acquisition systems and avoids the circular import present in the original
+codebase.
+"""
+
+from __future__ import annotations
+
+import copy
+import logging
 import operator as op
 import os
-import pickle
 import re
-import time
-from shutil import copyfile
+from collections import OrderedDict
+from inspect import signature
+
+import matplotlib as mpl
 import matplotlib.axes
-import matplotlib.mlab as mlab
-import matplotlib.pylab as pl
+import matplotlib.cm
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
-import matplotlib.cm
-import matplotlib as mpl
 import numpy as np
 import pandas as pd
 import scipy.interpolate
-import scipy.io as sio
 
 # from matplotlib.cm import get_cmap
 from matplotlib.cm import ScalarMappable
-from matplotlib.colors import to_rgba
-from matplotlib.ticker import FormatStrFormatter, ScalarFormatter
-from mpl_toolkits.axes_grid1 import make_axes_locatable
-from mpl_toolkits.mplot3d import Axes3D
 from scipy.interpolate import RegularGridInterpolator
-from scipy.ndimage.filters import gaussian_filter
+from scipy.ndimage import gaussian_filter
 from scipy.optimize import curve_fit
 from scipy.signal import medfilt, savgol_filter
 
 try:
     from lmfit import Parameters, minimize, report_fit
-except:
+except ImportError:  # Optional dependency used only by Dataset.global_fit.
     minimize = None
     Parameters = None
     report_fit = None
-import copy
-from collections import OrderedDict
-from inspect import signature
-
 from scipy.io import loadmat
+
+logger = logging.getLogger(__name__)
 
 # std_colors = [
 #     "#e41a1c",
@@ -88,22 +88,23 @@ from scipy.io import loadmat
 #     r"\sansmath",  # <- tricky! -- gotta actually tell tex to use!
 # ]
 
-import sys
-
-# from numpy import NaN, Inf, arange, isscalar, asarray, array
-
 
 def generate_color_list(cmap="gnuplot", length=1):
-    # o_cmap = get_cmap(cmap)
-    o_cmpa = ScalarMappable(cmap="viridis")
-    return [o_cmap(x / length) for x in range(length)]
+    """Return ``length`` evenly spaced colors from a Matplotlib colormap."""
+    if length < 0:
+        raise ValueError("length must be non-negative")
+    if length == 0:
+        return []
+    color_map = mpl.colormaps[cmap]
+    denominator = max(length - 1, 1)
+    return [color_map(index / denominator) for index in range(length)]
 
 
 def add_metric_prefix(d):
     """
     The function takes a floating point number, and outputs the value as a number between 1-999 with order of
     magnitude added.
-    
+
     Parameters
     ----------
     d : float
@@ -123,11 +124,34 @@ def add_metric_prefix(d):
     while abs(d) < 1 and unit > 0:
         d = d * 1000
         unit -= 1
-    return "%.2f %s" % (d, unit_list[unit])
+    return f"{d:.2f} {unit_list[unit]}"
+
+
+def _read_delimited_file(filename, axes, options):
+    """Read a delimited file and separate pandas options from Data metadata."""
+    options = dict(options)
+    valid_reader_options = set(signature(pd.read_csv).parameters)
+    reader_options = {
+        key: options.pop(key)
+        for key in tuple(options)
+        if key in valid_reader_options and key != "filepath_or_buffer"
+    }
+    if "sep" not in reader_options and "delimiter" not in reader_options:
+        reader_options["delimiter"] = "\t"
+    reader_options.setdefault("comment", "#")
+    reader_options.setdefault("header", None)
+    reader_options.setdefault("names", list(axes))
+
+    frame = pd.read_csv(filename, **reader_options)
+    columns = {
+        str(column): frame[column].to_numpy()
+        for column in frame
+        if not frame[column].empty
+    }
+    return columns, options
 
 
 class Subplot:
-
     _default = {
         "type": "2d",
         "bins": 50,
@@ -163,7 +187,7 @@ class Subplot:
 
     def __getitem__(self, item):
         ret = self._settings.get(item)
-        if ret == None:
+        if ret is None:
             ret = self._default.get(item)
         if item == "axis_labels" and not ret:
             return self.datasets[0].axes
@@ -210,12 +234,14 @@ class Figure:
         font=None,
         dpi=150,
         title="",
-        labels=[],
+        labels=None,
         size=1.0,
         sharex=False,
         sharey=False,
         pad=0.2,
     ):
+        if labels is None:
+            labels = []
         self._subplots = []
         self._aspect_ratio = aspect_ratio
         self._rows = rows
@@ -245,7 +271,7 @@ class Figure:
 
     def _get_axis_metric_prefix(self, dec, lim, reverse=False):
         decades = [1e-15, 1e-12, 1e-9, 1e-6, 1e-3, 1, 1e3, 1e6, 1e9, 1e12]
-        prefix = ["f", "p", "n", "\mu ", "m", "", "k", "M", "G", "T"]
+        prefix = ["f", "p", "n", r"\mu ", "m", "", "k", "M", "G", "T"]
         if reverse:
             decades = [1e15, 1e12, 1e-9, 1e6, 1e3, 1, 1e-3, 1e-6, 1e-9, 1e-12]
 
@@ -293,7 +319,7 @@ class Figure:
             for i, dataset in enumerate(subplot.datasets):
                 if dataset:
                     dataset.plot_2d(handles, index=i, **subplot.settings("cmap"))
-            if subplot["legend"] == True:
+            if subplot["legend"]:
                 tdct = subplot.settings("legend_loc")
                 if "legend_loc" in tdct:
                     tdct = {"loc": tdct["legend_loc"]}
@@ -304,7 +330,7 @@ class Figure:
                 if dataset:
                     dataset.plot_scatter(handles)
             subplot["lines"] = handles
-            if subplot["legend"] == True:
+            if subplot["legend"]:
                 plt.legend(handles=handles, frameon=subplot["legend_border"])
         if subplot["type"] == "hist2d":
             for dataset in subplot.datasets:
@@ -316,7 +342,7 @@ class Figure:
                     dataset.plot_hist(
                         index=i, **subplot.settings("bins", "color", "normed")
                     )
-            if subplot["legend"] == True:
+            if subplot["legend"]:
                 plt.legend(frameon=subplot["legend_border"])
         if subplot["type"] == "color":
             for dataset in subplot.datasets:
@@ -402,7 +428,7 @@ class Figure:
                 reverse="{metric_prefix_reverse}" in subplot["axis_labels"][1],
             )
             ticks = subplot["ax"].get_yticks() / scale_y
-            subplot["ax"].set_yticklabels(["${0:g}$".format(s) for s in ticks])
+            subplot["ax"].set_yticklabels([f"${s:g}$" for s in ticks])
             if subplot["ax"].get_ylabel():
                 subplot["ax"].set_ylabel(
                     subplot["axis_labels"][1]
@@ -419,7 +445,7 @@ class Figure:
                 reverse="{metric_prefix_reverse}" in subplot["axis_labels"][0],
             )
             ticks = subplot["ax"].get_xticks() / scale_x
-            subplot["ax"].set_xticklabels(["${0:g}$".format(s) for s in ticks])
+            subplot["ax"].set_xticklabels([f"${s:g}$" for s in ticks])
             if subplot["ax"].get_xlabel():
                 subplot["ax"].set_xlabel(
                     subplot["axis_labels"][0]
@@ -434,7 +460,6 @@ class Figure:
             )
             and subplot["cbar"] != "None"
         ):
-
             pf_z, scale_z = self._get_axis_metric_prefix(
                 subplot.settings().get("scale_factor_z", 1),
                 np.max(np.abs(subplot["cbar"].get_clim())),
@@ -463,7 +488,7 @@ class Figure:
                 )
             except:
                 ticks /= scale_z
-            ticklabels = np.array(["${0:g}$".format(s) for s in ticks], dtype=str)
+            ticklabels = np.array([f"${s:g}$" for s in ticks], dtype=str)
             # set the in between values to 0 (we don't generally need to see em)
             ticklabels[1 : (len(ticklabels) // 2)] = " "
             ticklabels[(len(ticklabels) // 2 + 1) : -1] = " "
@@ -541,9 +566,11 @@ class Figure:
         name="Figure",
         change_func=None,
         tight=True,
-        labels=[],
+        labels=None,
         show=True,
     ):
+        if labels is None:
+            labels = []
         Figure.cf = self
         params = {"legend.fontsize": 6, "legend.handlelength": 1}
         plt.rcParams.update(params)
@@ -687,52 +714,50 @@ class Figure:
 
 
 class Data:
-    _data = {}
+    """Collection of equally shaped, named NumPy arrays.
+
+    String indexing selects a column as another :class:`Data` object. Boolean
+    masks and slices select samples across every column. Arithmetic and
+    comparison operators are available on one-column objects.
+    """
 
     def __getitem__(self, item):
-        if type(item) is str:
+        if isinstance(item, str):
+            if item not in self._data:
+                raise KeyError(item)
             dat = self.copy()
             dat._data = {item: self._data[item]}
             return dat
-        if type(item) is np.ndarray:
-            d = {}
-            for key in self._data:
-                d[key] = self._data[key][item]
+        if isinstance(item, (np.ndarray, list, tuple)):
+            d = {key: values[item] for key, values in self._data.items()}
             dat = self.copy()
             dat._data = d
             return dat
-        if isinstance(item, slice) and len(self._data) > 1:
-            d = {}
-            for key in self._data:
-                d[key] = self._data[key][item]
+        if isinstance(item, slice):
+            d = {key: values[item] for key, values in self._data.items()}
             dat = self.copy()
             dat._data = d
             return dat
-        if type(item) is slice or np.issubdtype(item, int):
+        if isinstance(item, (int, np.integer)):
             if len(self._data) != 1:
-                raise RuntimeError(
+                raise IndexError(
                     f"Incorrect indexing, cannot find a single value for index {item}."
                 )
             return self._data[self.onlykey()][item]
-        print(f"No return for item: {type(item)}")
+        raise TypeError(f"unsupported index type: {type(item).__name__}")
 
     def __setitem__(self, key, value):
-        if type(key) is str:
-            if type(value) is np.ndarray:
-                self._data[key] = value
-            elif (
-                key not in self
-                and self._data[next(iter(self._data))].shape
-                == value._data[value.onlykey()].shape
-            ):
-                self._data[key] = value._data[value.onlykey()]
-            elif value._data[key].shape == self._data[key].shape:
-                self._data[key] = value._data[key]
-            else:
-                raise RuntimeError("Shapes do not match")
-        if type(key) is np.ndarray:
+        if isinstance(key, str):
+            array = value.values if isinstance(value, Data) else np.asarray(value)
+            if self._data and array.shape != next(iter(self._data.values())).shape:
+                raise ValueError("assigned column must match the existing data shape")
+            self._data[key] = array
+            return
+        if isinstance(key, np.ndarray):
             for col in self._data:
                 self._data[col][key] = value[col]
+            return
+        raise TypeError("key must be a column name or NumPy mask")
 
     ####################################################################################################################
     #  data operation methods
@@ -746,7 +771,7 @@ class Data:
             )
         # get numpy arrays
         key = self.onlykey()
-        if type(other) == type(self):
+        if isinstance(other, Data):
             if key not in other or len(other._data[key]) != len(self._data[key]):
                 raise RuntimeError("Incorrect operation.")
             return operator(self._data[key], other._data[key])
@@ -783,7 +808,7 @@ class Data:
     def __str__(self, *args, **kwargs):
         msg = ""
         for key in self._data:
-            msg += "{}:\n{}\n".format(key, self._data[key])
+            msg += f"{key}:\n{self._data[key]}\n"
         return msg
 
     def __contains__(self, key):
@@ -795,10 +820,7 @@ class Data:
         return self._data[self.onlykey()].__iter__()
 
     def __len__(self):
-
-        # if len(self._data) != 1:
-        #     return len(self._data[self.onlykey()].__len__()
-        return len(self._data)
+        return len(next(iter(self._data.values()))) if self._data else 0
 
     def __bool__(self):
         return bool(self._data)
@@ -818,7 +840,7 @@ class Data:
     ####################################################################################################################
 
     def copy(self, new_data=None):
-        if new_data:
+        if new_data is not None:
             d = copy.deepcopy(self)
             d._data = new_data
             return d
@@ -826,22 +848,18 @@ class Data:
         # return eval('{}(new_data,**self.ps())'.format(self.__class__.__name__))  # this is very ugly, but I don't know how to do it otherwise... subclasses should be called correctly!
 
     def __init__(self, dat, **kwargs):
-        self._plt_settings = None  # to prevent 'not set' errors
-        # a dictionary is supplied
-        if dat and type(dat) is dict or type(dat) is OrderedDict:
-            self._data = dat
-            shape = None
-            for key in self._data:
-                if type(self._data[key]) is not np.ndarray:
-                    raise RuntimeError("Can only use numpy arrays as data.")
-                if not shape:
-                    shape = self._data[key].shape
-                    continue
-                if self._data[key].shape != shape:
-                    raise RuntimeError("Length of the arrays do not match.")
-            self.ps(**kwargs)
+        if not isinstance(dat, (dict, OrderedDict)) or not dat:
+            raise ValueError("dat must be a non-empty mapping of NumPy arrays")
+        if any(not isinstance(value, np.ndarray) for value in dat.values()):
+            raise TypeError("all data columns must be NumPy arrays")
+        if len({value.shape for value in dat.values()}) != 1:
+            raise ValueError("all data columns must have the same shape")
+
+        self._data = dict(dat)
+        self._plt_settings = {}
+        self.ps(**kwargs)
         if not kwargs.get("axes"):
-            self.ps(axes=[key for key in dat])
+            self.ps(axes=list(dat))
         # set methods to instance methods
         self.reshape = self._reshape
         self.flatten = self._flatten
@@ -855,11 +873,10 @@ class Data:
             raise RuntimeError("New name already present in data!")
         self._data[new_name] = self._data[old_name]
         del self._data[old_name]
-        try:
-            i = self.axes.index(old_name)
-            self.axes[i] = new_name
-        except:
-            pass
+        if old_name in self.axes:
+            axes = list(self.axes)
+            axes[axes.index(old_name)] = new_name
+            self.axes = axes
 
     ####################################################################################################################
     #  load from file
@@ -867,111 +884,32 @@ class Data:
 
     @classmethod
     def load_from_file(cls, filename, **kwargs):
-        dat = None
-        ps = {}
-        if filename and isinstance(filename, str):
-            if filename.split(".")[-1] in ("dat", "csv", "txt", "asc"):
-                print("> Loading {}".format(filename))
-                # set the axes (which might have been read from the file)
-                axes = kwargs.get("axes", ("x", "y"))
-                ps["axes"] = axes
-                # add qtlab standards to the kwargs for pandas
-                # these two if lines add two dic elements
-                # {'comment': '#', 'delimiter', '\t'}
-                if "comment" not in kwargs:
-                    kwargs["comment"] = "#"
-                if "delimiter" not in kwargs:
-                    kwargs["delimiter"] = "\t"
-                # remove non pandas keys:
-                pandas_dct = dict(
-                    sep=", ",
-                    delimiter=None,
-                    header="infer",
-                    names=None,
-                    index_col=None,
-                    usecols=None,
-                    squeeze=False,
-                    prefix=None,
-                    mangle_dupe_cols=True,
-                    dtype=None,
-                    engine=None,
-                    converters=None,
-                    true_values=None,
-                    false_values=None,
-                    skipinitialspace=False,
-                    skiprows=None,
-                    nrows=None,
-                    na_values=None,
-                    keep_default_na=True,
-                    na_filter=True,
-                    verbose=False,
-                    skip_blank_lines=True,
-                    parse_dates=False,
-                    infer_datetime_format=False,
-                    keep_date_col=False,
-                    date_parser=None,
-                    dayfirst=False,
-                    iterator=False,
-                    chunksize=None,
-                    compression="infer",
-                    thousands=None,
-                    decimal=b".",
-                    lineterminator=None,
-                    quotechar='"',
-                    quoting=0,
-                    escapechar=None,
-                    comment=None,
-                    encoding=None,
-                    dialect=None,
-                    error_bad_lines=True,
-                    warn_bad_lines=True,
-                    skipfooter=0,
-                    doublequote=True,
-                    delim_whitespace=False,
-                    low_memory=True,
-                    memory_map=False,
-                    float_precision=None,
-                )
-                for key in kwargs:
-                    if key in pandas_dct:
-                        pandas_dct[key] = kwargs[key]
-                for key in pandas_dct:
-                    if key in kwargs:
-                        del kwargs[key]
-                del pandas_dct["names"]
-                if pandas_dct["header"] == "infer":
-                    d = pd.read_csv(filename, names=axes, **pandas_dct)
-                else:
-                    d = pd.read_csv(filename, **pandas_dct)
-                dat = {}
-                for key in d:
-                    if not d[key].empty:
-                        dat[key] = np.array(d[key])
-                if not dat:
-                    print(">> Warning: no data found for {}".format(filename))
-            elif filename.split(".")[-1] in ("mat"):
-                print("> Loading {}".format(filename))
-                # set the axes (which might have been read from the file)
-                axes = kwargs.get("axes", ("x", "y"))
-                ps["axes"] = axes
-                dct = loadmat(filename)
-                dat = {}
-                for key in axes:
-                    if key in dct and len(dct[key]) > 0:
-                        dat[key] = np.array(dct[key][0])
-                if not dat:
-                    print(
-                        ">> Warning: no data found in axes {} for {}. Possible axes: {}".format(
-                            axes, filename, [key for key in dct]
-                        )
-                    )
-            else:
-                raise RuntimeError(
-                    "Currently only supporting .txt, .dat, .csv, and .mat files as raw data."
-                )
-        if dat:
-            return cls(dat, **{**ps, **kwargs})
-        return None
+        path = os.fspath(filename)
+        axes = tuple(kwargs.pop("axes", ("x", "y")))
+        extension = os.path.splitext(path)[1].lower()
+        if extension in {".dat", ".csv", ".txt", ".tsv", ".asc"}:
+            if (
+                extension == ".csv"
+                and "sep" not in kwargs
+                and "delimiter" not in kwargs
+            ):
+                kwargs["sep"] = ","
+            data, metadata = _read_delimited_file(path, axes, kwargs)
+        elif extension == ".mat":
+            raw = loadmat(path)
+            data = {
+                axis: np.asarray(raw[axis]).squeeze()
+                for axis in axes
+                if axis in raw and np.asarray(raw[axis]).size
+            }
+            metadata = kwargs
+        else:
+            raise ValueError(
+                f"unsupported data file extension: {extension or '<none>'}"
+            )
+        if not data:
+            raise ValueError(f"no data found in {path}")
+        return cls(data, axes=list(axes), **metadata)
 
     ####################################################################################################################
     #  properties
@@ -1005,25 +943,22 @@ class Data:
         return self.plot_settings(*args, **kwargs)
 
     def plot_settings(self, *args, **kwargs):
-        if not self._plt_settings:
-            self._plt_settings = kwargs
-        else:
-            for key in kwargs:
-                self._plt_settings[key] = kwargs[key]
-        lst = {}
+        self._plt_settings.update(kwargs)
         if args:
-            for arg in args:
-                if arg in self._plt_settings:
-                    lst[arg] = self._plt_settings[arg]
-            return lst
-        else:
-            return self._plt_settings
+            return {
+                arg: self._plt_settings[arg]
+                for arg in args
+                if arg in self._plt_settings
+            }
+        return self._plt_settings
 
     ####################################################################################################################
     #  plot methods
     ####################################################################################################################
 
-    def plot_scatter(self, handles=[]):
+    def plot_scatter(self, handles=None):
+        if handles is None:
+            handles = []
         plt_set = self.plot_settings()
         picker = plt_set.get("picker", 5)
         line = plt.scatter(
@@ -1035,7 +970,9 @@ class Data:
         handles.append(line)
         return handles
 
-    def plot_2d(self, handles=[], cmap="gist_rainbow", index=0, **kwargs):
+    def plot_2d(self, handles=None, cmap="gist_rainbow", index=0, **kwargs):
+        if handles is None:
+            handles = []
         try:
             ns = np.unique(self[self.axes[2]].values)
         except:
@@ -1262,7 +1199,7 @@ class Data:
         return self
 
     def to_matrix(self, split_on=""):
-        if not split_on in self._data:
+        if split_on not in self._data:
             split_on = self.axes[0]
         uv = np.unique(self._data[split_on])
         return self.reshape((-1, int(len(self._data[split_on]) / len(uv))))
@@ -1277,9 +1214,9 @@ class Data:
             y = self[self.axes[1]].values[0, :]
             z = self[self.axes[2]].values
             if np.max(points[0]) > np.max(x) or np.min(points[0]) < np.min(x):
-                print("X axis out of range")
+                logger.warning("interpolation points exceed the x-axis range")
             if np.max(points[1]) > np.max(y) or np.min(points[1]) < np.min(y):
-                print("Y axis out of range")
+                logger.warning("interpolation points exceed the y-axis range")
             inter = RegularGridInterpolator((x, y), z)
             try:
                 dct = {
@@ -1363,19 +1300,19 @@ class Data:
     def _smooth(self, method="gaussian"):
         for key in self._data:
             d = self._data[key]
-            m = re.match("^medfilt((\d)+_(\d)+)?$", method)
+            m = re.match(r"^medfilt((\d)+_(\d)+)?$", method)
             if m:
                 try:
                     d = medfilt(d, (int(m.group(2)), int(m.group(3))))
                 except:
                     d = medfilt(d)
-            m = re.match("^gaussian(\d)*$", method)
+            m = re.match(r"^gaussian(\d)*$", method)
             if m:
                 try:
                     d = gaussian_filter(d, sigma=float(m.group(1)))  #
                 except:
                     d = gaussian_filter(d, sigma=1)  #
-            m = re.match("^savgol((\d+)_(\d+))?$", method)
+            m = re.match(r"^savgol((\d+)_(\d+))?$", method)
             if m:
                 if len(d.shape) > 1:
                     try:
@@ -1422,7 +1359,7 @@ class Data:
                 if method == "gradient":
                     dct[key] = np.gradient(self._data[key], axis=axis) / dx
                 elif "savgol" in method:
-                    m = re.match("^savgol((\d+)_(\d+))$", method)
+                    m = re.match(r"^savgol((\d+)_(\d+))$", method)
                     if m:
                         dct[key] = savgol_filter(
                             self._data[key],
@@ -1446,7 +1383,7 @@ class Data:
                 if method == "gradient":
                     dct[key] = np.gradient(self._data[key]) / dx
                 elif "savgol" in method:
-                    m = re.match("^savgol((\d+)_(\d+))$", method)
+                    m = re.match(r"^savgol((\d+)_(\d+))$", method)
                     if m:
                         dct[key] = savgol_filter(
                             self._data[key],
@@ -1594,7 +1531,7 @@ class Data:
             return_dct = {}
             return_lst = []
             i = 0
-            for key, val in zip(return_keys, param_list):
+            for key, val in zip(return_keys, param_list, strict=False):
                 if key in param_list_fixed:
                     return_lst.append(params[i])
                     return_dct[key] = params[i]
@@ -1631,11 +1568,12 @@ class Data:
                     r2 = 0.0
             else:
                 if bounds:
-                    print(len(xdata), len(ydata))
+                    logger.debug(
+                        "fitting %d x-values and %d y-values", len(xdata), len(ydata)
+                    )
                     params, _ = curve_fit(
                         fitfunc, (xdata, ydata), zdata, bounds=bounds, p0=p0
                     )
-                    print(len(xdata), len(ydata))
                     r2 = np.corrcoef(zdata, fitfunc((xdata, ydata), *params))[0][1] ** 2
                 else:
                     params, _ = curve_fit(fitfunc, (xdata, ydata), zdata, p0=p0)
@@ -1649,7 +1587,7 @@ class Data:
             return_dct = {}
             return_lst = []
             i = 0
-            for key, val in zip(return_keys, param_list):
+            for key, val in zip(return_keys, param_list, strict=False):
                 if key in param_list_fixed:
                     return_lst.append(params[i])
                     return_dct[key] = params[i]
@@ -1664,17 +1602,13 @@ class Data:
             raise RuntimeError("Cannot fit data, axes are ambiguous.")
 
     def save(self, filename, sep="\t"):
-        directory = os.path.dirname(filename)
-        if not os.path.exists(directory):
-            try:
-                os.makedirs(directory)
-            except:
-                pass
-        dct = {}
-        for ax in self.axes:
-            dct[ax] = self._data[ax].flatten()
-        df = pd.DataFrame(dct)
-        df.to_csv(filename, sep=sep, index=False)
+        """Write the selected axes to a delimited text file."""
+        path = os.fspath(filename)
+        directory = os.path.dirname(path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        columns = {axis: self._data[axis].flatten() for axis in self.axes}
+        pd.DataFrame(columns).to_csv(path, sep=sep, index=False)
 
 
 class Cyclic_Data(Data):
@@ -1689,21 +1623,17 @@ class Cyclic_Data(Data):
         return d.copy()._cycle_to_trace(**kwargs)
 
     def _cycle_to_trace(self, cyclic_axis="", method="average"):
-        if not cyclic_axis in self.axes:
+        if cyclic_axis not in self.axes:
             cyclic_axis = self.axes[0]
         shape = self._data[cyclic_axis].shape
         if len(shape) > 1:
-            print(shape)
             dct = {}
             l = int(shape[1] / 2)
             if "forward" in method or "backward" in method:
                 l += 1
             for key in self._data:
-                print("diocaneeeeeeeee")
-                print(key)
                 dct[key] = np.empty((shape[0], l))
             for i, d in enumerate(self._data[cyclic_axis]):
-
                 mn = np.argmin(d)
                 for key in self._data:
                     d = np.roll(self._data[key][i, :], -mn)
@@ -1749,7 +1679,7 @@ class Cyclic_Data(Data):
         return d.copy()._average_cycles(**kwargs)
 
     def _average_cycles(self, cyclic_axis="", ignore_first=False):
-        if not cyclic_axis in self.axes:
+        if cyclic_axis not in self.axes:
             cyclic_axis = self.axes[0]
         shape = self._data[cyclic_axis].shape
         if len(shape) > 1:
@@ -1809,7 +1739,7 @@ class Cyclic_Data(Data):
         return d.copy()._label_cycles(**kwargs)
 
     def _label_cycles(self, cyclic_axis="", to_axis="n"):
-        if not cyclic_axis in self.axes:
+        if cyclic_axis not in self.axes:
             cyclic_axis = self.axes[0]
         shape = self._data[cyclic_axis].shape
         if len(shape) > 1:
@@ -1856,14 +1786,14 @@ class Dataset:
             # get keys on both objects
             keys = []
             for key in self._dct:
-                if not key in keys:
+                if key not in keys:
                     keys.append(key)
             try:
                 l1 = len(self._dct[key])
             except:
                 l1 = 0
             for key in other._dct:
-                if not key in keys:
+                if key not in keys:
                     keys.append(key)
             try:
                 l2 = len(other._dct[key])
@@ -1960,11 +1890,11 @@ class Dataset:
     ):
         lst = []
         id = 0
-        for root, dir, files in os.walk(directory):
+        for root, _dir, files in os.walk(directory):
             for file in files:
                 filename = os.path.join(root, file).replace("\\", "/")
                 ext = filename.split(".")[-1]
-                if not ext in extensions:
+                if ext not in extensions:
                     continue
                 m = re.match(pattern, filename)
                 if m:
@@ -2009,7 +1939,7 @@ class Dataset:
                 if key in param_list:
                     p.append(params[key])
                 else:
-                    p.append(params["{}_{}".format(key, i)])
+                    p.append(params[f"{key}_{i}"])
             yfunc = func(x[i, :], *p)
             if len(lines):
                 lines[i].set_data(x[i, :], yfunc)
@@ -2066,7 +1996,7 @@ class Dataset:
                     if hasattr(max, "__len__"):
                         max = max[j]
                     fit_params.add(
-                        "{}_{}".format(sig[i], j),
+                        f"{sig[i]}_{j}",
                         value=p_,
                         min=min,
                         max=max,
@@ -2083,7 +2013,7 @@ class Dataset:
                 )
         out = minimize(Dataset._residual, fit_params, args=(self, func))
         if "fit" in self._dct:
-            print("> Overwriting fit data.")
+            logger.info("overwriting existing fit data")
         self._dct["fit"] = []
         param_list = list(out.params)
         for i, data in enumerate(self["data"]):
@@ -2093,7 +2023,7 @@ class Dataset:
                 if key in param_list:
                     p.append(out.params[key])
                 else:
-                    p.append(out.params["{}_{}".format(key, i)])
+                    p.append(out.params[f"{key}_{i}"])
             dat = data.copy()
             dat[dat.axes[-1]] = func(dat[dat.axes[0]].values, *p)
             dat.ps(linewidth=1, color="k", marker=None, label="")
@@ -2104,7 +2034,23 @@ class Dataset:
                 return_dct[key] = out.params[key].value
             else:
                 return_dct[key] = [
-                    out.params["{}_{}".format(key, i)].value for i in range(len(self))
+                    out.params[f"{key}_{i}"].value for i in range(len(self))
                 ]
         # run the global fit to all the data sets
         return return_dct if return_dict else out
+
+
+# PEP 8 name for new code; the original name remains available to notebooks.
+CyclicData = Cyclic_Data
+
+
+__all__ = [
+    "CyclicData",
+    "Cyclic_Data",
+    "Data",
+    "Dataset",
+    "Figure",
+    "Subplot",
+    "add_metric_prefix",
+    "generate_color_list",
+]
